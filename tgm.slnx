@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="tgm.Api/tgm.Api.csproj" />
+  <Project Path="tgm.AppHost/tgm.AppHost.csproj" Id="16216014-68b1-4941-a2dd-de9a0c4181c7" />
+  <Project Path="tgm.ServiceDefaults/tgm.ServiceDefaults.csproj" Id="1ec7ebd0-57c1-40f0-a821-d56c06c54ac1" />
+</Solution>
