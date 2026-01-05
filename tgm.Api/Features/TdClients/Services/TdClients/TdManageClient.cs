@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
 using TdLib;
 using tgm.Api.Database;
 using tgm.Api.Features.TdClients.Entities;
@@ -33,7 +34,7 @@ public class TdManageClient : IAsyncDisposable
 
         var scope = serviceScopeFactory.CreateScope();
         _hubContext = scope.ServiceProvider.GetRequiredService<IHubContext<TdClientHub, ITdClient>>();
-        _tdOptions = scope.ServiceProvider.GetRequiredService<TdOptions>();
+        _tdOptions = scope.ServiceProvider.GetRequiredService<IOptions<TdOptions>>().Value;
 
 
         _connectionId = connectionId;

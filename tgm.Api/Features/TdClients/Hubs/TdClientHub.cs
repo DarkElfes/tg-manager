@@ -5,20 +5,18 @@ using tgm.Api.Features.TdClients.Services;
 namespace tgm.Api.Features.TdClients.Hubs;
 
 public class TdClientHub(
-    TdClientManager _tdClientManager
+    TdClientManager _tdClientManager,
+    ILogger<TdClientHub> _logger
     ) : Hub<ITdClient>
 {
-    private const string MONITORING_GROUP = "Monitoring";
-
     #region Connection Management
     public override async Task OnConnectedAsync()
     {
-        // No specific action on connection
-        Debug.WriteLine("User connected with id" + Context.ConnectionId);
+        _logger.LogInformation("User connected with id: {ConnectionId}", Context.ConnectionId);
     }
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        Debug.WriteLine("User disconnected with id" + Context.ConnectionId);
+        _logger.LogInformation("User disconnected with id: {ConnectionId}", Context.ConnectionId);
 
         string connectionId = Context.ConnectionId;
         await _tdClientManager.DisconnectFromQrStreamAsync(connectionId);
@@ -35,7 +33,7 @@ public class TdClientHub(
     #region Chats Monitoring
     public async Task ConnectToMonitoring()
     {
-        await Groups.AddToGroupAsync(Context.ConnectionId, MONITORING_GROUP);
+        await Groups.AddToGroupAsync(Context.ConnectionId, TdClientsConstants.Groups.Monitoring);
     }
     #endregion
 
@@ -47,7 +45,7 @@ public class TdClientHub(
     public async Task LoadMessagesAsync(Guid accountId, long chatId, bool isFirstLoad)
     {
         var service = _tdClientManager.GetService(accountId) ?? throw new Exception("Account service not found");
-        await service.GetChatMessagesAsync(chatId, 50, isFirstLoad);
+        await service.GetMessagesAsync(chatId, 50, isFirstLoad);
     }
     #endregion
 }

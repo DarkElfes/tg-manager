@@ -31,6 +31,7 @@ builder.Services.AddOptions<TdOptions>()
     .Bind(builder.Configuration.GetSection(TdOptions.Td));
 
 builder.Services.AddSingleton<TdClientManager>();
+builder.Services.AddSingleton<TdClientStateManager>();
 
 builder.Services.AddSignalR();
 #endregion

@@ -1,6 +1,8 @@
 ﻿using tgm.Api.Abstractions.Endpoints;
 using tgm.Api.Database;
+using tgm.Api.Features.TdClients.DTOs;
 using tgm.Api.Features.TdClients.Entities;
+using tgm.Api.Features.TdClients.Services;
 
 namespace tgm.Api.Features.TdClients.Endpoints;
 
@@ -18,9 +20,15 @@ public static class GetTgAccounts
     }
 
     public static IResult Handler(
-        AppDbContext context
+        AppDbContext context,
+        TdClientStateManager stateManager
         )
     {
-        return Results.Ok(context.TgAccounts.ToList());
+        return Results.Ok(context.TgAccounts.Select(x => new AccountDTO(
+            x.Id,
+            x.FirstName,
+            x.PhoneNumber,
+            stateManager.GetClientState(x.Id)
+            )));
     }
 }

@@ -14,9 +14,9 @@ namespace tgm.Api.Features.TdClients.Services.TdClients;
 public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
 {
     private readonly IHubContext<TdClientHub, ITdClient> _hubContext;
-    private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly TdOptions _tdOptions;
     private readonly ILogger<TdAccountClient> _logger;
+    private readonly TdClientStateManager _stateManager;
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _pending = [];
 
@@ -29,22 +29,32 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
         TgAccount tgAccount,
         string[] connectionIds)
     {
-        (_serviceScopeFactory, _account) = (serviceScopeFactory, tgAccount);
+        _account = tgAccount;
 
-        var scope = _serviceScopeFactory.CreateScope();
+        var scope = serviceScopeFactory.CreateScope();
         _hubContext = scope.ServiceProvider.GetRequiredService<IHubContext<TdClientHub, ITdClient>>();
         _tdOptions = scope.ServiceProvider.GetRequiredService<IOptions<TdOptions>>().Value;
         _logger = scope.ServiceProvider.GetRequiredService<ILogger<TdAccountClient>>();
+        _stateManager = scope.ServiceProvider.GetRequiredService<TdClientStateManager>();
 
-        _ = _hubContext.Clients.Groups("Monitoring").ReceiveClientStateAsync(_account.Id, TdClientState.Starting);
+        _ = _stateManager.UpdateClientStateAsync(_account.Id, TdClientState.Starting);
 
         FolderPath = Path.Combine(_tdOptions.Directory, _account.PhoneNumber);
-        Array.ForEach(connectionIds, x => _connectionIds.TryAdd(x));
-
-        EnsureOrCreateIsDirExist();
+        Array.ForEach(connectionIds, x => AddConnection(x));
 
         _pending["isReadyState"] = new();
+
+        try
+        {
+            StartListening();
+        }
+        catch (Exception ex)
+        {
+            _ = _stateManager.UpdateClientStateAsync(_account.Id, TdClientState.Error);
+            _logger.LogError(ex, "Error starting TdAccountClient for account {AccountName}", _account.FirstName);
+        }
     }
+
 
     #region Update Handlers
 
@@ -72,90 +82,60 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
             case TdApi.AuthorizationState.AuthorizationStateWaitPhoneNumber:
                 throw new Exception("account signed out");
             case TdApi.AuthorizationState.AuthorizationStateReady authStateReady:
+                _logger.LogInformation("Account: {AccountName} is ready", _account.FirstName);
                 var tsc = _pending["isReadyState"];
                 tsc.SetResult();
-                _logger.LogInformation("Account: {AccountName} is ready", _account.FirstName);
-                _ = _hubContext.Clients.Groups("Monitoring").ReceiveClientStateAsync(_account.Id, TdClientState.Running);
-                break;
-            default:
-                //throw new Exception(authUpdate.AuthorizationState.GetType().ToString());
+
+                _ = _stateManager.UpdateClientStateAsync(_account.Id, TdClientState.Running);
                 break;
         }
     }
     protected override void HandleNewChatUpdate(TdApi.Update.UpdateNewChat newChatUpdate)
     {
         var newChat = newChatUpdate.Chat;
-        _ = _hubContext.Clients.Clients(_connectionIds).ReceiveChatAsync(_account.Id, new ChatDTO(newChat.Id, newChat.Title));
+
+        _hubContext.Clients
+            .Clients(_connectionIds)
+            .ReceiveChatAsync(_account.Id, new ChatDTO(newChat.Id, newChat.Title))
+            .Wait();
 
         try
         {
-            if (newChat.Photo?.Small is TdApi.File file)
+            if (newChat.Photo?.Small is not TdApi.File file)
             {
-                if (file.Local.IsDownloadingCompleted)
-                {
-                    var fileData = File.ReadAllBytes(file.Local.Path);
-
-                    _hubContext.Clients.Clients(_connectionIds).ReceiveChatPhotoAsync(_account.Id, newChat.Id, fileData);
-                }
-                else
-                {
-                    _ = Task.Run(async () =>
-                    {
-                        var downloadedFile = await _client.DownloadFileAsync(file.Id, priority: 1, synchronous: true);
-                        var fileData = File.ReadAllBytes(downloadedFile.Local.Path);
-                        
-                        await _hubContext.Clients.Clients(_connectionIds).ReceiveChatPhotoAsync(_account.Id, newChat.Id, fileData);
-                    });
-                    //_ = _client.DownloadFileAsync(file.Id, 1);
-                }
+                return;
             }
+
+            if (file.Local.IsDownloadingCompleted)
+            {
+                var fileData = File.ReadAllBytes(file.Local.Path);
+
+                _ = _hubContext.Clients
+                    .Clients(_connectionIds)
+                    .ReceiveChatPhotoAsync(_account.Id, newChat.Id, fileData);
+            }
+            else
+            {
+                _ = Task.Run(async () =>
+                {
+                    var downloadedFile = await _client.DownloadFileAsync(file.Id, priority: 1, synchronous: true);
+                    var fileData = File.ReadAllBytes(downloadedFile.Local.Path);
+
+                    await _hubContext.Clients
+                        .Clients(_connectionIds)
+                        .ReceiveChatPhotoAsync(_account.Id, newChat.Id, fileData);
+                });
+            }
+
         }
         catch (Exception e)
         {
-
             _logger.LogError(e, "Error downloading chat photo for chat {ChatId} for account {AccountName}", newChat.Id, _account.FirstName);
         }
 
 
     }
 
-    protected override void HandleFileUpdate(TdApi.Update.UpdateFile fileUpdate)
-    {
-        //var file = fileUpdate.File;
-        //if (fileUpdate.File.Local.IsDownloadingCompleted)
-        //{
-
-        //    var fileData = File.ReadAllBytes(file.Local.Path);
-
-        //    _hubContext.Clients.Clients(_connectionIds).ReceiveChatPhotoAsync(_account.Id, 1, fileData);
-
-        //}
-    }
-    protected override void HandleFileDownloadUpdate(TdApi.Update.UpdateFileDownload fileDownloadUpdate)
-    {
-        base.HandleFileDownloadUpdate(fileDownloadUpdate);
-    }
-
-    #endregion
-
-
-    #region Additional Methods
-    private void EnsureOrCreateIsDirExist()
-    {
-        // Ensure base directory exists
-        if (!Directory.Exists(_tdOptions.Directory))
-        {
-            Directory.CreateDirectory(_tdOptions.Directory);
-        }
-
-        // Ensure client-specific directory exists
-        if (!Directory.Exists(FolderPath))
-        {
-            throw new Exception("Client folder not exist");
-        }
-    }
-    private (string, string) GetDirPaths()
-        => (Path.Combine(FolderPath, "db"), Path.Combine(FolderPath, "files"));
 
     #endregion
 
@@ -163,36 +143,47 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
     #region Public Methods
     public async Task GetChatsAsync()
     {
-        _logger.LogInformation("Start loading chats process for account: {AccountName}", _account.FirstName);
-        if (_pending.TryGetValue("isReadyState", out var isReadyStateTsc))
-        {
-            await isReadyStateTsc.Task;
-        }
-
         try
         {
-            _logger.LogInformation("Execute loading chats command for account: {AccountName}", _account.FirstName);
-            var count = await _client.LoadChatsAsync(chatList: null, limit: 100);
+            if (_pending.TryGetValue("isReadyState", out var isReadyStateTsc))
+            {
+                await isReadyStateTsc.Task.WaitAsync(_cts.Token);
+            }
 
-            _logger.LogInformation("Successful executed request to receiving chats for account: {AccountName} in count: {ChatCount}", _account.FirstName, count);
+            _logger.LogInformation("Execute request chats command for account: {AccountName}", _account.FirstName);
+
+            var res = await _client.LoadChatsAsync(chatList: null, limit: 100);
+
+            _logger.LogInformation("Successful executed request to receiving chats for account: {AccountName} in count: {ChatCount}", _account.FirstName, res.Extra);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException ex)
         {
-            _logger.LogError(ex, "Error getting chats for account {AccountName}", _account.FirstName);
-            await _hubContext.Clients.Clients(_connectionIds).ReceiveErrorMessageAsync($"Error gettings chats: {ex.Message}");
+            _logger.LogInformation(ex, "GetChatsAsync operation was cancelled for account: {AccountName}", _account.FirstName);
+        }
+        catch (TdException ex)
+        {
+            _logger.LogError(ex, "Error getting chats for account: {AccountName}", _account.FirstName);
+        }
+        catch(Exception)
+        {
+
+        }
+        finally
+        {
+            await _hubContext.Clients
+                .Clients(_connectionIds)
+                .ReceiveErrorMessageAsync($"Failure to get chats for account: {_account.FirstName}");
         }
     }
-    public async Task GetChatMessagesAsync(long chatId, int limit = 50, bool isFirstLoad = false)
+    public async Task GetMessagesAsync(long chatId, int limit = 50, bool isFirstLoad = false)
     {
-        //_logger.LogInformation("Start loading messages for chat {ChatId} for account {AccountName}", chatId, _account.FirstName);
-        if (_pending.TryGetValue("isReadyState", out var isReadyStateTsc))
-        {
-            await isReadyStateTsc.Task;
-        }
 
         try
         {
-            //await _client.OpenChatAsync(chatId);
+            if (_pending.TryGetValue("isReadyState", out var isReadyStateTsc))
+            {
+                await isReadyStateTsc.Task.WaitAsync(_cts.Token);
+            }
 
 
             var messages = await _client.GetChatHistoryAsync(
@@ -201,7 +192,7 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
                     offset: 0,             // 0 = без зсуву
                     limit: limit,          // Кількість повідомлень
                     onlyLocal: false       // Завантажуємо з сервера
-                );
+                ).WaitAsync(_cts.Token);
 
             if (!isFirstLoad)
             {
@@ -211,10 +202,10 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
                    offset: 0,             // 0 = без зсуву
                    limit: limit,          // Кількість повідомлень
                    onlyLocal: false       // Завантажуємо з сервера
-               );
+               ).WaitAsync(_cts.Token);
             }
 
-            _logger.LogInformation("Received messages for account: {AccountName}, chat: {ChatId} count: {MessageCount}", _account.FirstName, chatId, messages.TotalCount); 
+            //_logger.LogInformation("Received messages for account: {AccountName}, chat: {ChatId} count: {MessageCount}", _account.FirstName, chatId, messages.TotalCount); 
 
             var messagesDtos = messages?.Messages_?.Select(x => new MessageDTO(
                 x.Id,
@@ -229,10 +220,17 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
 
 
         }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogInformation(ex, "GetMessageAsync operation was cancelled for account: {AccountName}", _account.FirstName);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting messages for chat {ChatId} for account {AccountName}", chatId, _account.FirstName);
-            await _hubContext.Clients.Clients(_connectionIds).ReceiveErrorMessageAsync($"Error getting messages: {ex.Message}");
+
+            await _hubContext.Clients
+                .Clients(_connectionIds)
+                .ReceiveErrorMessageAsync($"Error getting messages: {ex.Message}");
         }
     }
 
@@ -256,39 +254,30 @@ public class TdAccountClient : TdClientAbstraction, IAsyncDisposable
         };
     }
 
-    public int GetConnectionCount() => _connectionIds.Count;
-    public void AddUserConnection(string connectionId)
-    {
-        if (_connectionIds.TryAdd(connectionId))
-        {
-            _logger.LogInformation("Connection: {ConnectionId} added to account: {AccountName}", connectionId, _account.FirstName);
-        }
-        else
-        {
-            _logger.LogWarning("Failure to add connection: {ConnectionId} to account {AccountName}", connectionId, _account.FirstName);
-        }
-    }
-    public void RemoveUserConnection(string connectionId)
-    {
-        if (_connectionIds.TryRemove(connectionId))
-        {
-            _logger.LogInformation("Connection: {ConnectionId} removed from account: {AccountName}", connectionId, _account.FirstName);
-        }
-    }
+
 
     #endregion
 
 
     #region Dispose
 
-    //~TdAccountClient()
-    //{
-    //    _ = DisposeAsync(false);
-    //}
+    private readonly Lock _disposedLock = new();
+    private bool _isDisposed;
     protected override async ValueTask DisposeAsync(bool disposing)
     {
+        lock (_disposedLock)
+        {
+            if (_isDisposed)
+                return;
+            _isDisposed = true;
+        }
+
+        if (disposing)
+        {
+            await _stateManager.RemoveClientStateAsync(_account.Id);
+        }
+
         await base.DisposeAsync(disposing);
-        _ = _hubContext.Clients.Groups("Monitoring").ReceiveClientStateAsync(_account.Id, TdClientState.Stopped);
     }
     #endregion
 

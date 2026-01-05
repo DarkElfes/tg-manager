@@ -58,10 +58,10 @@ public class TdClientManager(
             }
             else
             {
-                service.AddUserConnection(connectionId);
+                service.AddConnection(connectionId);
             }
 
-            var _ = service.GetChatsAsync();
+            _ = service.GetChatsAsync();
         }
     }
     public async Task DisconnectFromAccountsSrteamAsync(string connectionId)
@@ -73,14 +73,16 @@ public class TdClientManager(
             if (_tdAccountServices.TryGetValue(account.Id, out var service))
             {
                 // Remove currect user connection from service connections
-                service.RemoveUserConnection(connectionId);
+                service.RemoveConnection(connectionId);
 
                 // If current user was last in collection - stop this service
                 if (service.GetConnectionCount() == 0)
                 {
-                    await service.DisposeAsync();
-                    _tdAccountServices.Remove(account.Id, out _);
-                    _logger.LogInformation("Disposing TdAccountService for accountId: {AccountId}", account.Id);
+                    if (_tdAccountServices.TryRemove(account.Id, out var removedService))
+                    {
+                        _ = removedService.DisposeAsync();
+                        _logger.LogInformation("Disposing TdAccountService for accountId: {AccountId}", account.Id);
+                    }
                 }
             }
         }
